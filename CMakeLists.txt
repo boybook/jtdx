@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.7.2 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.10)
 
 if (APPLE)
   #
@@ -15,14 +15,19 @@ if (APPLE)
 
 Earliest version we can support with Qt 5.12, C++11 & libc++ is 10.13.
 Do not override this if you intend to build an official deployable installer.")
-  set (CMAKE_OSX_SYSROOT /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk
-    CACHE STRING "Mac OS X SDK to build with
-
-Change this to the newest SDK available that you can install on your system (>10.14 preferred).
-Do not override this if you intend to build an official deployable installer.")
+# set (CMAKE_OSX_SYSROOT /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.13.sdk
+#   CACHE STRING "Mac OS X SDK to build with
+#
+# Change this to the newest SDK available that you can install on your system (>10.14 preferred).
+# Do not override this if you intend to build an official deployable installer.")
 endif (APPLE)
 
 project (jtdx C CXX Fortran)
+
+# Add Fortran compiler options
+if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+  set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -frecursive -fmax-stack-var-size=65536")
+endif()
 
 #
 # CMake policies

@@ -1,2 +1,5 @@
 TAGS
 tags
+build
+src/hamlib
+.idea/

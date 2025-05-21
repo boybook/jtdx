@@ -1,0 +1,240 @@
+name: Build JTDX
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:  # 允许手动触发构建
+
+env:
+  QT_VERSION: "5.15.2"
+  BUILD_TYPE: "Release"
+
+jobs:
+  build-macos-arm:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: |
+          brew install cmake qt@5 fftw gcc boost libomp libusb asciidoc asciidoctor autoconf automake libtool pkg-config texinfo hamlib libxslt docbook-xsl webp libheif
+          sudo xcode-select --install || true
+          sudo xcodebuild -license accept || true
+          brew link --overwrite gcc
+
+      - name: Configure and Build JTDX
+        env:
+          FC: /opt/homebrew/bin/gfortran-13
+          CMAKE_Fortran_COMPILER: /opt/homebrew/bin/gfortran-13
+        run: |
+          mkdir -p build
+          cd build
+          cmake \
+            -D CMAKE_PREFIX_PATH="$(brew --prefix qt@5)/lib/cmake/Qt5;/opt/homebrew/opt/webp;/usr/local" \
+            -D Qt5_DIR="$(brew --prefix qt@5)/lib/cmake/Qt5" \
+            -D CMAKE_INSTALL_PREFIX="install" \
+            -D CMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+            -D CMAKE_BUILD_TYPE=Release \
+            -D WSJT_GENERATE_DOCS=OFF \
+            -D WSJT_SKIP_MANPAGES=ON \
+            -D fixup_library_dirs="$(brew --prefix webp)/lib;$(brew --prefix libheif)/lib;/opt/homebrew/lib/gcc/current" \
+            ..
+          cmake --build . --config Release
+          cmake --install . --config Release
+          
+      - name: Create DMG
+        shell: bash
+        run: |
+          mkdir -p dist
+          hdiutil create \
+            -volname "JTDX" \
+            -srcfolder "build/install" \
+            -ov \
+            -format UDZO \
+            "dist/JTDX.dmg"
+          
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jtdx-macos-arm
+          path: dist/JTDX.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: |
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-qt5
+            mingw-w64-x86_64-gcc-fortran
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-harfbuzz
+            mingw-w64-x86_64-crt-git
+            git
+
+      - name: Cache vcpkg
+        uses: actions/cache@v3
+        with:
+          path: |
+            vcpkg/installed
+            vcpkg/buildtrees
+            vcpkg/downloads
+          key: ${{ runner.os }}-vcpkg-${{ hashFiles('**/vcpkg.json') }}
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          if (Test-Path "vcpkg") {
+            Rename-Item -Path "vcpkg" -NewName "vcpkg_cache"
+          }
+          git clone https://github.com/Microsoft/vcpkg vcpkg
+          if (Test-Path "vcpkg_cache") {
+            if (Test-Path "vcpkg_cache/installed") {
+              Move-Item -Path "vcpkg_cache/installed" -Destination "vcpkg/" -Force
+            }
+            if (Test-Path "vcpkg_cache/buildtrees") {
+              Move-Item -Path "vcpkg_cache/buildtrees" -Destination "vcpkg/" -Force
+            }
+            if (Test-Path "vcpkg_cache/downloads") {
+              Move-Item -Path "vcpkg_cache/downloads" -Destination "vcpkg/" -Force
+            }
+            Remove-Item -Path "vcpkg_cache" -Recurse -Force
+          }
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg.exe install fftw3[core,threads] boost --recurse
+      
+      - name: Validate vcpkg
+        shell: pwsh
+        run: |
+          .\vcpkg\vcpkg.exe list
+
+      - name: Build Hamlib from source
+        shell: msys2 {0}
+        run: |
+          pacman -S --noconfirm --needed autoconf automake libtool make
+          git clone --depth 1 git://git.code.sf.net/p/jtdx/hamlib src
+          cd src
+          git checkout master
+          ./bootstrap
+          ./configure --prefix=/mingw64 \
+            --disable-static --enable-shared \
+            --without-readline --without-indi \
+            --without-cxx-binding --disable-winradio \
+            CC=/mingw64/bin/gcc CXX=/mingw64/bin/g++ \
+            CFLAGS="-g -O2 -fdata-sections -ffunction-sections -I/mingw64/include" \
+            LDFLAGS="-Wl,--gc-sections" \
+            LIBUSB_LIBS="-L/mingw64/lib -lusb-1.0" \
+            --disable-dependency-tracking
+          make -j$(nproc)
+          make install
+
+      - name: Install OmniRig
+        shell: pwsh
+        run: |
+          choco install omnirig -y
+          Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+          RefreshEnv
+
+      - name: Ensure MSYS2 bin in PATH
+        shell: msys2 {0}
+        run: echo "/mingw64/bin" >> $GITHUB_PATH
+
+      - name: Ensure UCRT DLLs
+        shell: msys2 {0}
+        run: pacman -S --noconfirm mingw-w64-x86_64-crt-git
+
+      - name: List DLLs for debugging
+        shell: msys2 {0}
+        run: |
+          echo $PATH
+          ls -l /mingw64/bin | grep dll
+
+      - name: Build with CMake
+        shell: msys2 {0}
+        run: |
+          mkdir build && cd build
+          cmake .. -G "MinGW Makefiles" \
+            -DCMAKE_TOOLCHAIN_FILE="../vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -Dfixup_bundle_dirs="$MSYS2_PATH/mingw64/bin;C:/Windows/System32;/mingw64/bin;" \
+            -DVCPKG_TARGET_TRIPLET="x64-windows" \
+            -DCMAKE_PREFIX_PATH="$MSYS2_PATH/mingw64" \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_Fortran_COMPILER=/mingw64/bin/gfortran.exe \
+            -DWSJT_GENERATE_DOCS=OFF \
+            -DWSJT_SKIP_MANPAGES=ON \
+            -DSKIP_POSTPROCESS_BUNDLE=ON
+          cmake --build . --config ${{ env.BUILD_TYPE }}
+          cmake --install . --config ${{ env.BUILD_TYPE }}
+          
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jtdx-windows
+          path: "C:/Program Files (x86)/jtdx"
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install dependencies
+        run: |
+            sudo apt-get update
+            sudo apt-get install -y \
+            build-essential cmake qtbase5-dev qt5-qmake \
+            qtmultimedia5-dev libqt5multimedia5-plugins \
+            libqt5serialport5-dev libqt5websockets5-dev \
+            libfftw3-dev libhamlib-dev libudev-dev libusb-1.0-0-dev gfortran \
+            libboost-all-dev qttools5-dev qttools5-dev-tools \
+            qtchooser qtbase5-dev-tools autoconf automake libtool pkg-config
+          
+      - name: Build Hamlib from source
+        run: |
+          git clone --depth 1 https://github.com/Hamlib/Hamlib.git Hamlib
+          cd Hamlib
+          ./bootstrap
+          ./configure --prefix=/usr/local \
+            --disable-static --enable-shared \
+            --without-readline --without-indi \
+            --without-cxx-binding --disable-winradio \
+            CFLAGS="-g -O2 -fdata-sections -ffunction-sections" \
+            LDFLAGS="-Wl,--gc-sections"
+          make -j$(nproc)
+          sudo make install
+          cd ..
+          
+      - name: Build
+        run: |
+          mkdir build
+          cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DWSJT_GENERATE_DOCS=OFF \
+            -DWSJT_SKIP_MANPAGES=ON \
+            -DCMAKE_PREFIX_PATH=/usr/local
+          cmake --build . --config ${{ env.BUILD_TYPE }}
+          
+      - name: Create DEB package
+        run: |
+          cd build
+          cpack -G DEB
+          
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jtdx-linux
+          path: |
+            build/*.deb

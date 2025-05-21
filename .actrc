@@ -1,0 +1,4 @@
+--container-architecture linux/amd64
+--bind
+--env-file .env
+-P macos-latest=nektos/act-environments-ubuntu:18.04 
